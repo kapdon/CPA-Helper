@@ -31,7 +31,7 @@ SECONDARY_RESET_TS = 1_778_569_664
 class FakeCPAClient:
     def __init__(self, detail: dict):
         self.detail = detail
-        self.priority_calls: list[tuple[str, int]] = []
+        self.priority_calls: list[tuple[str, int | None]] = []
         self.disabled_calls: list[tuple[str, bool]] = []
 
     def list_auth_files(self) -> list[dict]:
@@ -43,7 +43,7 @@ class FakeCPAClient:
     def set_auth_disabled(self, name: str, disabled: bool) -> None:
         self.disabled_calls.append((name, disabled))
 
-    def set_auth_priority(self, name: str, priority: int) -> None:
+    def set_auth_priority(self, name: str, priority: int | None) -> None:
         self.priority_calls.append((name, priority))
 
     def delete_auth_file(self, name: str) -> None:
@@ -546,12 +546,13 @@ def test_missing_token_disables_bad_credential_without_usage_check() -> None:
 
     assert stats.status_disabled == 1
     assert cpa.disabled_calls == [("codex-a.json", True)]
+    assert cpa.priority_calls == [("codex-a.json", None)]
     assert usage_client.calls == []
     with Session(get_engine()) as session:
         state = session.get(CodexKeeperAuthState, "codex-a.json")
         assert state is not None
         assert state.disabled is True
-        assert state.priority == 4
+        assert state.priority is None
         assert state.latest_action == "禁用凭证：缺少 access token"
 
 
@@ -827,7 +828,7 @@ def test_manual_low_priority_clears_stale_keeper_degrade_state() -> None:
         assert state.restore_priority is None
 
 
-def test_bad_credential_only_uses_status_disable() -> None:
+def test_bad_credential_disables_status_and_clears_priority() -> None:
     cpa = FakeCPAClient(_detail(priority=4))
     service = CodexKeeperService(
         _settings(),
@@ -840,12 +841,12 @@ def test_bad_credential_only_uses_status_disable() -> None:
 
     assert stats.status_disabled == 1
     assert cpa.disabled_calls == [("codex-a.json", True)]
-    assert cpa.priority_calls == []
+    assert cpa.priority_calls == [("codex-a.json", None)]
     with Session(get_engine()) as session:
         state = session.get(CodexKeeperAuthState, "codex-a.json")
         assert state is not None
         assert state.disabled is True
-        assert state.priority == 4
+        assert state.priority is None
         assert state.restore_priority is None
         assert state.latest_action == "禁用凭证：凭证不可用：HTTP 401，unauthorized"
 
@@ -901,7 +902,7 @@ def test_process_auth_file_defers_account_state_write_until_serial_apply() -> No
 def test_keeper_run_keeps_workers_and_applies_state_updates_on_main_thread() -> None:
     class MultiCPAClient(FakeCPAClient):
         def __init__(self) -> None:
-            self.priority_calls: list[tuple[str, int]] = []
+            self.priority_calls: list[tuple[str, int | None]] = []
             self.disabled_calls: list[tuple[str, bool]] = []
 
         def list_auth_files(self) -> list[dict]:

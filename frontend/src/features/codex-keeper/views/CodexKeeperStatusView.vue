@@ -124,7 +124,11 @@ const errorAccountCount = computed(() => accounts.value.filter((account) => acco
 const systemPriorityCount = computed(
   () =>
     accounts.value.filter(
-      (account) => account.priority !== null && account.priority >= -1 && account.priority <= 20,
+      (account) =>
+        !account.disabled &&
+        account.priority !== null &&
+        account.priority >= -1 &&
+        account.priority <= 20,
     ).length,
 )
 const highPriorityCount = computed(

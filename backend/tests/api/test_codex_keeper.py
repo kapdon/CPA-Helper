@@ -150,7 +150,7 @@ def test_codex_keeper_account_actions_sync_local_state(
 ) -> None:
     _setup_admin(client)
     disabled_calls: list[tuple[str, bool]] = []
-    priority_calls: list[tuple[str, int]] = []
+    priority_calls: list[tuple[str, int | None]] = []
 
     class FakeKeeperCPAClient:
         def __init__(self, settings: codex_keeper_service.KeeperRuntimeSettings):
@@ -159,7 +159,7 @@ def test_codex_keeper_account_actions_sync_local_state(
         def set_auth_disabled(self, name: str, disabled: bool) -> None:
             disabled_calls.append((name, disabled))
 
-        def set_auth_priority(self, name: str, priority: int) -> None:
+        def set_auth_priority(self, name: str, priority: int | None) -> None:
             priority_calls.append((name, priority))
 
         def delete_auth_file(self, name: str) -> None:
@@ -201,14 +201,20 @@ def test_codex_keeper_account_actions_sync_local_state(
         session.commit()
 
     disabled = client.post("/api/codex-keeper/accounts/codex-a.json/disable")
+    assert disabled.status_code == 200
+    assert disabled.json() == {"status": "disabled"}
+    with Session(get_engine()) as session:
+        state = session.get(CodexKeeperAuthState, "codex-a.json")
+        assert state is not None
+        assert state.disabled is True
+        assert state.priority == 4
+
     enabled = client.post("/api/codex-keeper/accounts/codex-a.json/enable")
     updated = client.patch(
         "/api/codex-keeper/accounts/codex-a.json/priority",
         json={"priority": 21},
     )
 
-    assert disabled.status_code == 200
-    assert disabled.json() == {"status": "disabled"}
     assert enabled.status_code == 200
     assert updated.status_code == 200
     assert disabled_calls == [("codex-a.json", True), ("codex-a.json", False)]
@@ -230,13 +236,13 @@ def test_codex_keeper_priority_endpoint_restricts_manual_values(
     monkeypatch,
 ) -> None:
     _setup_admin(client)
-    priority_calls: list[tuple[str, int]] = []
+    priority_calls: list[tuple[str, int | None]] = []
 
     class FakeKeeperCPAClient:
         def __init__(self, settings: codex_keeper_service.KeeperRuntimeSettings):
             self.settings = settings
 
-        def set_auth_priority(self, name: str, priority: int) -> None:
+        def set_auth_priority(self, name: str, priority: int | None) -> None:
             priority_calls.append((name, priority))
 
         def delete_auth_file(self, name: str) -> None:

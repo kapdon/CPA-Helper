@@ -142,7 +142,7 @@ class KeeperCPAClientProtocol(Protocol):
 
     def set_auth_disabled(self, name: str, disabled: bool) -> None: ...
 
-    def set_auth_priority(self, name: str, priority: int) -> None: ...
+    def set_auth_priority(self, name: str, priority: int | None) -> None: ...
 
     def delete_auth_file(self, name: str) -> None: ...
 
@@ -188,7 +188,7 @@ class KeeperCPAClient:
         )
         _ensure_success(response, "写入 auth file 状态失败")
 
-    def set_auth_priority(self, name: str, priority: int) -> None:
+    def set_auth_priority(self, name: str, priority: int | None) -> None:
         response = self._request(
             "PATCH",
             "/v0/management/auth-files/fields",
@@ -427,6 +427,7 @@ class CodexKeeperService:
                     name,
                     cause=disable_cause,
                 )
+                next_priority = None if effective_disabled else priority
                 if effective_disabled:
                     stats.status_disabled += 1
                 display_action = _keeper_disable_operation_action(
@@ -436,7 +437,7 @@ class CodexKeeperService:
                 state_update = self._state_update_bad_auth(
                     name,
                     detail,
-                    priority=priority,
+                    priority=next_priority,
                     account_type=account_type,
                     disabled=effective_disabled,
                     latest_action=display_action,
@@ -449,7 +450,7 @@ class CodexKeeperService:
                     now,
                     detail=detail,
                     account_type=account_type,
-                    priority=priority,
+                    priority=next_priority,
                     disabled=effective_disabled,
                     latest_action=display_action,
                     state_update=state_update,
@@ -525,13 +526,14 @@ class CodexKeeperService:
                     name,
                     cause=cause,
                 )
+                next_priority = None if effective_disabled else priority
                 if effective_disabled:
                     stats.status_disabled += 1
                 display_action = _keeper_disable_operation_action(cause, effective_disabled)
                 state_update = self._state_update_bad_auth(
                     name,
                     detail,
-                    priority=priority,
+                    priority=next_priority,
                     account_type=account_type,
                     disabled=effective_disabled,
                     latest_action=display_action,
@@ -545,7 +547,7 @@ class CodexKeeperService:
                     now,
                     detail=detail,
                     account_type=account_type,
-                    priority=priority,
+                    priority=next_priority,
                     disabled=effective_disabled,
                     status_code=result.status_code,
                     latest_action=display_action,
@@ -767,9 +769,10 @@ class CodexKeeperService:
         effective_disabled = False
         if not self.settings.dry_run:
             self.cpa_client.set_auth_disabled(name, True)
+            self.cpa_client.set_auth_priority(name, None)
             effective_disabled = True
         if effective_disabled:
-            self._log(f"{name}: {cause}，已写入禁用状态")
+            self._log(f"{name}: {cause}，已写入禁用状态并清除 priority")
         else:
             self._log(f"{name}: {cause}，dry-run 未禁用")
         return effective_disabled
