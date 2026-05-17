@@ -327,14 +327,16 @@ type CollectorConfig struct {
 }
 
 type KeeperConfig struct {
-	ScheduleCron        string `json:"schedule_cron"`
-	QuotaThreshold      int    `json:"quota_threshold"`
-	UsageTimeoutSeconds int    `json:"usage_timeout_seconds"`
-	CPATimeoutSeconds   int    `json:"cpa_timeout_seconds"`
-	MaxRetries          int    `json:"max_retries"`
-	WorkerThreads       int    `json:"worker_threads"`
-	DryRun              bool   `json:"dry_run"`
-	AutoStartDaemon     bool   `json:"auto_start_daemon"`
+	ScheduleCron                      string `json:"schedule_cron"`
+	QuotaThreshold                    int    `json:"quota_threshold"`
+	UsageTimeoutSeconds               int    `json:"usage_timeout_seconds"`
+	CPATimeoutSeconds                 int    `json:"cpa_timeout_seconds"`
+	MaxRetries                        int    `json:"max_retries"`
+	WorkerThreads                     int    `json:"worker_threads"`
+	ConditionalRefreshIntervalSeconds int    `json:"conditional_refresh_interval_seconds"`
+	AccountRefreshCacheMinutes        int    `json:"account_refresh_cache_minutes"`
+	DryRun                            bool   `json:"dry_run"`
+	AutoStartDaemon                   bool   `json:"auto_start_daemon"`
 }
 
 type AppConfig struct {
@@ -360,14 +362,16 @@ func defaultConfig() (AppConfig, error) {
 			RetryIntervalSeconds: 10.0,
 		},
 		CodexKeeper: KeeperConfig{
-			ScheduleCron:        "*/30 * * * *",
-			QuotaThreshold:      100,
-			UsageTimeoutSeconds: 15,
-			CPATimeoutSeconds:   30,
-			MaxRetries:          2,
-			WorkerThreads:       8,
-			DryRun:              true,
-			AutoStartDaemon:     false,
+			ScheduleCron:                      "*/30 * * * *",
+			QuotaThreshold:                    100,
+			UsageTimeoutSeconds:               15,
+			CPATimeoutSeconds:                 30,
+			MaxRetries:                        2,
+			WorkerThreads:                     8,
+			ConditionalRefreshIntervalSeconds: 30,
+			AccountRefreshCacheMinutes:        10,
+			DryRun:                            true,
+			AutoStartDaemon:                   false,
 		},
 		CodexKeeperPriorityRule: clonePriorityRules(defaultKeeperPriorityRules),
 		SessionSecret:           secret,
@@ -439,7 +443,20 @@ func normalizeKeeperConfig(cfg KeeperConfig) KeeperConfig {
 	cfg.CPATimeoutSeconds = maxInt(cfg.CPATimeoutSeconds, 1, 30)
 	cfg.MaxRetries = clampInt(cfg.MaxRetries, 0, 5, 2)
 	cfg.WorkerThreads = clampInt(cfg.WorkerThreads, 1, 64, 8)
+	if !validKeeperConditionalRefreshInterval(cfg.ConditionalRefreshIntervalSeconds) {
+		cfg.ConditionalRefreshIntervalSeconds = 30
+	}
+	cfg.AccountRefreshCacheMinutes = maxInt(cfg.AccountRefreshCacheMinutes, 1, 10)
 	return cfg
+}
+
+func validKeeperConditionalRefreshInterval(seconds int) bool {
+	switch seconds {
+	case 0, 5, 10, 30, 60:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizePriorityRules(input map[string]int) map[string]int {

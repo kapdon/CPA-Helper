@@ -24,6 +24,11 @@ type keeperStatusResponse struct {
 	Logs          []string `json:"logs"`
 }
 
+type keeperSettingsResponse struct {
+	ConditionalRefreshIntervalSeconds int `json:"conditional_refresh_interval_seconds"`
+	AccountRefreshCacheMinutes        int `json:"account_refresh_cache_minutes"`
+}
+
 type keeperAccountsResponse struct {
 	Items []struct {
 		Name           string  `json:"name"`
@@ -119,6 +124,51 @@ func TestKeeperAutoStartReportsDaemonRunning(t *testing.T) {
 	if status.DaemonRunning {
 		t.Fatal("daemon_running = true, want false after stop")
 	}
+}
+
+func TestKeeperSettingsExposeConditionalRefreshConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("CPA_HELPER_DATA_DIR", dataDir)
+
+	app, err := backendApp.New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Routes()
+	cookies := requestJSON(t, handler, http.MethodPost, "/api/auth/setup", map[string]any{
+		"username": "admin",
+		"password": "test-password",
+		"nickname": "Admin",
+	}, nil, nil)
+
+	settings := keeperSettingsResponse{}
+	requestJSON(t, handler, http.MethodGet, "/api/codex-keeper/settings", nil, cookies, &settings)
+	if settings.ConditionalRefreshIntervalSeconds != 30 {
+		t.Fatalf("conditional_refresh_interval_seconds = %d, want 30", settings.ConditionalRefreshIntervalSeconds)
+	}
+	if settings.AccountRefreshCacheMinutes != 10 {
+		t.Fatalf("account_refresh_cache_minutes = %d, want 10", settings.AccountRefreshCacheMinutes)
+	}
+
+	requestJSON(t, handler, http.MethodPut, "/api/codex-keeper/settings", map[string]any{
+		"conditional_refresh_interval_seconds": 0,
+		"account_refresh_cache_minutes":        15,
+	}, cookies, &settings)
+	if settings.ConditionalRefreshIntervalSeconds != 0 {
+		t.Fatalf("saved conditional_refresh_interval_seconds = %d, want 0", settings.ConditionalRefreshIntervalSeconds)
+	}
+	if settings.AccountRefreshCacheMinutes != 15 {
+		t.Fatalf("saved account_refresh_cache_minutes = %d, want 15", settings.AccountRefreshCacheMinutes)
+	}
+
+	requestJSONExpectStatus(t, handler, http.MethodPut, "/api/codex-keeper/settings", map[string]any{
+		"conditional_refresh_interval_seconds": 7,
+	}, cookies, http.StatusUnprocessableEntity)
+	requestJSONExpectStatus(t, handler, http.MethodPut, "/api/codex-keeper/settings", map[string]any{
+		"account_refresh_cache_minutes": 0,
+	}, cookies, http.StatusUnprocessableEntity)
 }
 
 func TestKeeperLogsUseStandardFileFormatAndCanBeCleared(t *testing.T) {
@@ -1284,6 +1334,40 @@ func requestJSON(
 		}
 	}
 	return append(cookies, recorder.Result().Cookies()...)
+}
+
+func requestJSONExpectStatus(
+	t *testing.T,
+	handler http.Handler,
+	method string,
+	path string,
+	body any,
+	cookies []*http.Cookie,
+	expected int,
+) {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal request body: %v", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	request := httptest.NewRequest(method, path, reader)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != expected {
+		t.Fatalf("%s %s returned %d, want %d: %s", method, path, recorder.Code, expected, recorder.Body.String())
+	}
 }
 
 func stringPtrValue(value *string) string {

@@ -77,6 +77,8 @@ export interface CodexKeeperSettings {
   cpa_timeout_seconds: number
   max_retries: number
   worker_threads: number
+  conditional_refresh_interval_seconds: number
+  account_refresh_cache_minutes: number
   dry_run: boolean
   auto_start_daemon: boolean
   priority_rules: CodexKeeperPriorityRule[]
@@ -89,6 +91,8 @@ export interface CodexKeeperSettingsUpdatePayload {
   cpa_timeout_seconds?: number
   max_retries?: number
   worker_threads?: number
+  conditional_refresh_interval_seconds?: number
+  account_refresh_cache_minutes?: number
   dry_run?: boolean
   auto_start_daemon?: boolean
   priority_rules?: CodexKeeperPriorityRule[]

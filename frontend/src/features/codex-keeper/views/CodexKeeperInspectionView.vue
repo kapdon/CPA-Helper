@@ -8,6 +8,7 @@ import {
   NIcon,
   NInput,
   NInputNumber,
+  NSelect,
   NSpace,
   NSwitch,
   NTag,
@@ -68,6 +69,14 @@ const shouldFollowLatestLog = ref(true)
 let statusTimer: number | undefined
 let schedulePreviewTimer: number | undefined
 
+const conditionalRefreshIntervalOptions = [
+  { label: '关闭', value: 0 },
+  { label: '5 秒', value: 5 },
+  { label: '10 秒', value: 10 },
+  { label: '30 秒', value: 30 },
+  { label: '60 秒', value: 60 },
+]
+
 const form = reactive({
   schedule_cron: '*/30 * * * *',
   quota_threshold: 100,
@@ -75,6 +84,8 @@ const form = reactive({
   cpa_timeout_seconds: 30,
   max_retries: 2,
   worker_threads: 8,
+  conditional_refresh_interval_seconds: 30,
+  account_refresh_cache_minutes: 10,
   dry_run: true,
   auto_start_daemon: false,
 })
@@ -144,6 +155,8 @@ function applySettings(nextSettings: Awaited<ReturnType<typeof getCodexKeeperSet
   form.cpa_timeout_seconds = nextSettings.cpa_timeout_seconds
   form.max_retries = nextSettings.max_retries
   form.worker_threads = nextSettings.worker_threads
+  form.conditional_refresh_interval_seconds = nextSettings.conditional_refresh_interval_seconds
+  form.account_refresh_cache_minutes = nextSettings.account_refresh_cache_minutes
   form.dry_run = nextSettings.dry_run
   form.auto_start_daemon = nextSettings.auto_start_daemon
   nextRunTimes.value = nextSettings.next_run_times
@@ -404,9 +417,10 @@ const priorityColumns: DataTableColumns<CodexKeeperPriorityRule> = [
   {
     title: '账号类型',
     key: 'account_type',
-    minWidth: 150,
+    minWidth: 132,
     render: (row) =>
       h(NInput, {
+        size: 'small',
         value: row.account_type,
         placeholder: '例如 pro_20x',
         onUpdateValue: (value: string) => {
@@ -417,9 +431,10 @@ const priorityColumns: DataTableColumns<CodexKeeperPriorityRule> = [
   {
     title: '优先级',
     key: 'priority',
-    width: 130,
+    width: 112,
     render: (row) =>
       h(NInputNumber, {
+        size: 'small',
         value: row.priority,
         min: 0,
         max: 20,
@@ -431,11 +446,11 @@ const priorityColumns: DataTableColumns<CodexKeeperPriorityRule> = [
   {
     title: '',
     key: 'actions',
-    width: 70,
+    width: 58,
     render: (row) =>
       h(
         NButton,
-        { size: 'small', quaternary: true, type: 'error', onClick: () => removeRule(row) },
+        { size: 'tiny', quaternary: true, type: 'error', onClick: () => removeRule(row) },
         { default: () => '移除' },
       ),
   },
@@ -530,7 +545,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="grid-two">
+    <div class="grid-two inspection-settings-grid">
       <section class="panel inspection-config-panel">
         <div class="panel-inner config-panel-inner">
           <div class="section-heading">
@@ -586,6 +601,29 @@ onBeforeUnmount(() => {
                     </div>
                     <div v-else class="preview-muted">填写 Cron 表达式后显示</div>
                   </div>
+                </div>
+                <div class="conditional-refresh-grid">
+                  <NFormItem label="按条件扫描间隔">
+                    <NSelect
+                      v-model:value="form.conditional_refresh_interval_seconds"
+                      :options="conditionalRefreshIntervalOptions"
+                    />
+                  </NFormItem>
+                  <NFormItem label="账号刷新缓存（分钟）">
+                    <NInputNumber
+                      v-model:value="form.account_refresh_cache_minutes"
+                      :min="1"
+                      :precision="0"
+                    />
+                  </NFormItem>
+                </div>
+                <div class="conditional-refresh-help">
+                  <p>
+                    <strong>按条件扫描间隔：</strong>后台自动巡检开启后，每隔多久检查一次是否有账号需要刷新；会查找缓存时间内有实际请求的账号，以及额度刷新时间已到的账号。
+                  </p>
+                  <p>
+                    <strong>账号刷新缓存：</strong>控制自动任务的防重复时间；同一账号在缓存时间内不会被自动巡检或按条件扫描重复刷新，手动刷新会绕过缓存但会更新缓存时间。
+                  </p>
                 </div>
               </section>
 
@@ -657,11 +695,11 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel priority-rules-panel">
         <div class="panel-inner">
           <div class="section-heading">
             <h2 class="section-title">账号类型优先级</h2>
-            <NButton secondary @click="addRule">新增规则</NButton>
+            <NButton size="small" secondary @click="addRule">新增规则</NButton>
           </div>
           <p class="section-hint">
             账号当前优先级超过 20 时视为手动优先，巡检不会覆盖；0 ~ 20 会按这里的账号类型规则维护。
@@ -671,9 +709,8 @@ onBeforeUnmount(() => {
             size="small"
             :columns="priorityColumns"
             :data="displayedPriorityRules"
-            :max-height="272"
             :pagination="false"
-            :scroll-x="360"
+            :scroll-x="320"
           />
         </div>
       </section>
@@ -781,6 +818,10 @@ onBeforeUnmount(() => {
   padding: 12px 14px 14px;
 }
 
+.inspection-settings-grid {
+  align-items: start;
+}
+
 .config-panel-inner {
   display: grid;
   gap: 10px;
@@ -847,6 +888,26 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(220px, 0.82fr) minmax(0, 1fr);
   gap: 10px;
   align-items: end;
+}
+
+.conditional-refresh-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 8px 10px;
+  margin-top: 10px;
+}
+
+.conditional-refresh-help {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 0;
+  color: var(--cpa-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.conditional-refresh-help p {
+  margin: 0;
 }
 
 .params-grid {
@@ -987,16 +1048,40 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.priority-rules-panel {
+  align-self: start;
+}
+
+.priority-rules-panel .panel-inner {
+  padding: 16px 20px 18px;
+}
+
+.priority-rules-panel .section-heading {
+  margin-bottom: 6px;
+}
+
+.priority-rules-panel .section-hint {
+  margin-bottom: 12px;
+}
+
 .priority-table :deep(.n-data-table-wrapper),
 .priority-table :deep(.n-data-table-base-table),
 .priority-table :deep(.n-data-table-base-table-body) {
   min-width: 0;
 }
 
-.priority-table :deep(.n-data-table-base-table-body),
-.priority-table :deep(.n-scrollbar-container) {
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+.priority-table :deep(.n-data-table-th),
+.priority-table :deep(.n-data-table-td) {
+  padding: 6px 10px;
+}
+
+.priority-table :deep(.n-data-table-th) {
+  font-size: 13px;
+}
+
+.priority-table :deep(.n-input),
+.priority-table :deep(.n-input-number) {
+  width: 100%;
 }
 
 .log-panel,
@@ -1176,6 +1261,7 @@ onBeforeUnmount(() => {
   }
 
   .schedule-grid,
+  .conditional-refresh-grid,
   .runtime-info-grid {
     grid-template-columns: 1fr;
   }

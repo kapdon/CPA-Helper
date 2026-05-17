@@ -72,15 +72,17 @@ type keeperPriorityRule struct {
 }
 
 type keeperSettingsUpdateRequest struct {
-	ScheduleCron        *string              `json:"schedule_cron"`
-	QuotaThreshold      *int                 `json:"quota_threshold"`
-	UsageTimeoutSeconds *int                 `json:"usage_timeout_seconds"`
-	CPATimeoutSeconds   *int                 `json:"cpa_timeout_seconds"`
-	MaxRetries          *int                 `json:"max_retries"`
-	WorkerThreads       *int                 `json:"worker_threads"`
-	DryRun              *bool                `json:"dry_run"`
-	AutoStartDaemon     *bool                `json:"auto_start_daemon"`
-	PriorityRules       []keeperPriorityRule `json:"priority_rules"`
+	ScheduleCron                      *string              `json:"schedule_cron"`
+	QuotaThreshold                    *int                 `json:"quota_threshold"`
+	UsageTimeoutSeconds               *int                 `json:"usage_timeout_seconds"`
+	CPATimeoutSeconds                 *int                 `json:"cpa_timeout_seconds"`
+	MaxRetries                        *int                 `json:"max_retries"`
+	WorkerThreads                     *int                 `json:"worker_threads"`
+	ConditionalRefreshIntervalSeconds *int                 `json:"conditional_refresh_interval_seconds"`
+	AccountRefreshCacheMinutes        *int                 `json:"account_refresh_cache_minutes"`
+	DryRun                            *bool                `json:"dry_run"`
+	AutoStartDaemon                   *bool                `json:"auto_start_daemon"`
+	PriorityRules                     []keeperPriorityRule `json:"priority_rules"`
 }
 
 type keeperCronPreviewRequest struct {
@@ -358,18 +360,78 @@ func (r *KeeperRunner) daemonLoop(stop <-chan struct{}, done chan<- struct{}) {
 			}
 			continue
 		}
-		delay := time.Until(times[0])
-		if delay < 0 {
-			delay = 0
-		}
+		delay := positiveDuration(time.Until(times[0]))
 		r.log("下一轮计划：" + times[0].In(appTimeLocation).Format("2006-01-02 15:04:05"))
-		if waitForStop(stop, delay) {
-			return
+		cronTimer := time.NewTimer(delay)
+		conditionalInterval := keeperConditionalRefreshInterval(cfg)
+		var conditionalTicker *time.Ticker
+		var conditionalC <-chan time.Time
+		if conditionalInterval > 0 {
+			conditionalTicker = time.NewTicker(conditionalInterval)
+			conditionalC = conditionalTicker.C
 		}
-		if r.markRunning("daemon") {
-			r.run("daemon")
+
+		restartCycle := false
+		for !restartCycle {
+			select {
+			case <-stop:
+				cronTimer.Stop()
+				if conditionalTicker != nil {
+					conditionalTicker.Stop()
+				}
+				return
+			case <-cronTimer.C:
+				if conditionalTicker != nil {
+					conditionalTicker.Stop()
+				}
+				if r.markRunning("daemon") {
+					r.run("daemon")
+				}
+				restartCycle = true
+			case <-conditionalC:
+				nextCfg, err := r.app.loadConfig(context.Background())
+				if err != nil {
+					r.log("读取 Codex Keeper 条件刷新配置失败：" + err.Error())
+					continue
+				}
+				nextInterval := keeperConditionalRefreshInterval(nextCfg)
+				if nextInterval != conditionalInterval {
+					cronTimer.Stop()
+					if conditionalTicker != nil {
+						conditionalTicker.Stop()
+					}
+					restartCycle = true
+					continue
+				}
+				names, err := r.app.conditionalKeeperRefreshCandidates(context.Background(), nextCfg)
+				if err != nil {
+					r.log("Codex Keeper 条件刷新候选查询失败：" + err.Error())
+					continue
+				}
+				if len(names) == 0 {
+					continue
+				}
+				if r.markRunning("conditional") {
+					r.runAccounts("conditional", names)
+				}
+			}
 		}
 	}
+}
+
+func positiveDuration(delay time.Duration) time.Duration {
+	if delay < 0 {
+		return 0
+	}
+	return delay
+}
+
+func keeperConditionalRefreshInterval(cfg AppConfig) time.Duration {
+	seconds := cfg.CodexKeeper.ConditionalRefreshIntervalSeconds
+	if !validKeeperConditionalRefreshInterval(seconds) || seconds == 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (r *KeeperRunner) markRunning(mode string) bool {
@@ -384,6 +446,8 @@ func (r *KeeperRunner) markRunning(mode string) bool {
 	r.state = "running"
 	if mode == "accounts" {
 		r.detail = "正在刷新 Codex 账号"
+	} else if mode == "conditional" {
+		r.detail = "正在按条件刷新 Codex 账号"
 	} else {
 		r.detail = "正在巡检 Codex 账号"
 	}
@@ -747,18 +811,20 @@ func keeperSettingsResponse(cfg AppConfig) map[string]any {
 		times = []time.Time{}
 	}
 	return map[string]any{
-		"cliaproxy_url":         cfg.Collector.CLIProxyURL,
-		"management_key_set":    strings.TrimSpace(cfg.Collector.ManagementKey) != "",
-		"schedule_cron":         normalized,
-		"next_run_times":        apiDateTimes(times),
-		"quota_threshold":       cfg.CodexKeeper.QuotaThreshold,
-		"usage_timeout_seconds": cfg.CodexKeeper.UsageTimeoutSeconds,
-		"cpa_timeout_seconds":   cfg.CodexKeeper.CPATimeoutSeconds,
-		"max_retries":           cfg.CodexKeeper.MaxRetries,
-		"worker_threads":        cfg.CodexKeeper.WorkerThreads,
-		"dry_run":               cfg.CodexKeeper.DryRun,
-		"auto_start_daemon":     cfg.CodexKeeper.AutoStartDaemon,
-		"priority_rules":        sortedPriorityRules(cfg.CodexKeeperPriorityRule),
+		"cliaproxy_url":                        cfg.Collector.CLIProxyURL,
+		"management_key_set":                   strings.TrimSpace(cfg.Collector.ManagementKey) != "",
+		"schedule_cron":                        normalized,
+		"next_run_times":                       apiDateTimes(times),
+		"quota_threshold":                      cfg.CodexKeeper.QuotaThreshold,
+		"usage_timeout_seconds":                cfg.CodexKeeper.UsageTimeoutSeconds,
+		"cpa_timeout_seconds":                  cfg.CodexKeeper.CPATimeoutSeconds,
+		"max_retries":                          cfg.CodexKeeper.MaxRetries,
+		"worker_threads":                       cfg.CodexKeeper.WorkerThreads,
+		"conditional_refresh_interval_seconds": cfg.CodexKeeper.ConditionalRefreshIntervalSeconds,
+		"account_refresh_cache_minutes":        cfg.CodexKeeper.AccountRefreshCacheMinutes,
+		"dry_run":                              cfg.CodexKeeper.DryRun,
+		"auto_start_daemon":                    cfg.CodexKeeper.AutoStartDaemon,
+		"priority_rules":                       sortedPriorityRules(cfg.CodexKeeperPriorityRule),
 	}
 }
 
@@ -832,6 +898,18 @@ func (a *App) updateKeeperSettings(w http.ResponseWriter, r *http.Request) error
 		}
 		cfg.CodexKeeper.WorkerThreads = *payload.WorkerThreads
 	}
+	if payload.ConditionalRefreshIntervalSeconds != nil {
+		if !validKeeperConditionalRefreshInterval(*payload.ConditionalRefreshIntervalSeconds) {
+			return validationError("conditional_refresh_interval_seconds 超出范围")
+		}
+		cfg.CodexKeeper.ConditionalRefreshIntervalSeconds = *payload.ConditionalRefreshIntervalSeconds
+	}
+	if payload.AccountRefreshCacheMinutes != nil {
+		if *payload.AccountRefreshCacheMinutes < 1 {
+			return validationError("account_refresh_cache_minutes 不能小于 1")
+		}
+		cfg.CodexKeeper.AccountRefreshCacheMinutes = *payload.AccountRefreshCacheMinutes
+	}
 	if payload.DryRun != nil {
 		cfg.CodexKeeper.DryRun = *payload.DryRun
 	}
@@ -863,7 +941,23 @@ func (a *App) executeKeeperRun(ctx context.Context, mode string, logFn func(stri
 	return a.executeKeeperRunForAccounts(ctx, mode, nil, logFn)
 }
 
+type keeperRunOptions struct {
+	Mode            string
+	AuthNames       []string
+	ManualRefresh   bool
+	UseRefreshCache bool
+}
+
 func (a *App) executeKeeperRunForAccounts(ctx context.Context, mode string, authNames []string, logFn func(string)) (keeperStats, string, error) {
+	return a.executeKeeperRunWithOptions(ctx, keeperRunOptions{
+		Mode:            mode,
+		AuthNames:       authNames,
+		ManualRefresh:   mode == "accounts",
+		UseRefreshCache: mode == "daemon" || mode == "conditional",
+	}, logFn)
+}
+
+func (a *App) executeKeeperRunWithOptions(ctx context.Context, options keeperRunOptions, logFn func(string)) (keeperStats, string, error) {
 	cfg, err := a.loadConfig(ctx)
 	if err != nil {
 		return keeperStats{}, "", err
@@ -871,11 +965,11 @@ func (a *App) executeKeeperRunForAccounts(ctx context.Context, mode string, auth
 	if strings.TrimSpace(cfg.Collector.ManagementKey) == "" {
 		return keeperStats{}, "", validationError("管理密钥未设置，无法运行 Codex Keeper")
 	}
-	runID, err := a.createKeeperRun(ctx, mode)
+	runID, err := a.createKeeperRun(ctx, options.Mode)
 	if err != nil {
 		return keeperStats{}, "", err
 	}
-	targetNames, err := normalizeOptionalKeeperAuthNames(authNames)
+	targetNames, err := normalizeOptionalKeeperAuthNames(options.AuthNames)
 	if err != nil {
 		_ = a.finishKeeperRun(ctx, runID, "failed", err.Error(), keeperStats{})
 		return keeperStats{}, "", err
@@ -884,7 +978,9 @@ func (a *App) executeKeeperRunForAccounts(ctx context.Context, mode string, auth
 	for _, name := range targetNames {
 		targetSet[name] = true
 	}
-	if len(targetSet) > 0 {
+	if options.Mode == "conditional" {
+		logFn(fmt.Sprintf("开始按条件刷新 %d 个 Codex 账号", len(targetSet)))
+	} else if len(targetSet) > 0 {
 		logFn(fmt.Sprintf("开始刷新 %d 个 Codex 账号", len(targetSet)))
 	} else {
 		logFn("开始 Codex 账号巡检")
@@ -907,8 +1003,19 @@ func (a *App) executeKeeperRunForAccounts(ctx context.Context, mode string, auth
 		}
 	}
 	stats.Total = len(filtered)
+	if options.UseRefreshCache {
+		var skipped int
+		filtered, skipped, err = a.filterKeeperCachedAuthItems(ctx, filtered, cfg)
+		if err != nil {
+			_ = a.finishKeeperRun(ctx, runID, "failed", err.Error(), stats)
+			return stats, "", err
+		}
+		stats.Skipped += skipped
+	}
 	if len(filtered) == 0 {
-		if len(targetSet) > 0 {
+		if stats.Total > 0 && options.UseRefreshCache {
+			detail = "缓存时间内没有需要自动刷新的 Codex auth file"
+		} else if len(targetSet) > 0 {
 			detail = "未发现指定 Codex auth file"
 		} else {
 			detail = "未发现 Codex auth file"
@@ -917,19 +1024,174 @@ func (a *App) executeKeeperRunForAccounts(ctx context.Context, mode string, auth
 		return stats, detail, nil
 	}
 	for _, item := range filtered {
-		result := a.processKeeperAuth(ctx, cfg, item, logFn, mode == "accounts")
+		result := a.processKeeperAuth(ctx, cfg, item, logFn, options.ManualRefresh)
 		a.mergeKeeperStats(&stats, result)
 		if err := a.recordKeeperRunAccount(ctx, runID, result); err != nil {
 			logFn("写入巡检账号历史失败：" + err.Error())
 		}
 	}
-	if len(targetSet) > 0 {
+	if options.Mode == "conditional" {
+		detail = fmt.Sprintf("条件刷新完成：健康 %d，坏凭证禁用 %d，优先级降级 %d，优先级恢复 %d，网络错误 %d，缓存跳过 %d", stats.Healthy, stats.StatusDisabled, stats.PriorityDegraded, stats.PriorityRestored, stats.NetworkError, stats.Skipped)
+	} else if len(targetSet) > 0 {
 		detail = fmt.Sprintf("账号刷新完成：健康 %d，凭证异常 %d，网络错误 %d", stats.Healthy, stats.StatusDisabled, stats.NetworkError)
 	} else {
-		detail = fmt.Sprintf("巡检完成：健康 %d，坏凭证禁用 %d，优先级降级 %d，网络错误 %d", stats.Healthy, stats.StatusDisabled, stats.PriorityDegraded, stats.NetworkError)
+		detail = fmt.Sprintf("巡检完成：健康 %d，坏凭证禁用 %d，优先级降级 %d，网络错误 %d，缓存跳过 %d", stats.Healthy, stats.StatusDisabled, stats.PriorityDegraded, stats.NetworkError, stats.Skipped)
 	}
 	_ = a.finishKeeperRun(ctx, runID, "completed", detail, stats)
 	return stats, detail, nil
+}
+
+func keeperRefreshCacheDuration(cfg AppConfig) time.Duration {
+	minutes := cfg.CodexKeeper.AccountRefreshCacheMinutes
+	if minutes < 1 {
+		minutes = 10
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (a *App) conditionalKeeperRefreshCandidates(ctx context.Context, cfg AppConfig) ([]string, error) {
+	cacheWindow := keeperRefreshCacheDuration(cfg)
+	since := time.Now().In(appTimeLocation).Add(-cacheWindow)
+	names := []string{}
+	seen := map[string]bool{}
+	addName := func(name string) {
+		normalized := strings.TrimSpace(name)
+		if normalized == "" || seen[normalized] {
+			return
+		}
+		seen[normalized] = true
+		names = append(names, normalized)
+	}
+
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT raw_json
+		FROM usage_records
+		WHERE timestamp >= ?
+		ORDER BY timestamp DESC
+	`, dbTime(since))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var rawJSON string
+		if err := rows.Scan(&rawJSON); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if authIndex := rawJSONStringField(rawJSON, "auth_index"); authIndex != nil {
+			addName(*authIndex)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = a.db.QueryContext(ctx, `
+		SELECT auth_name
+		FROM codex_keeper_auth_states
+		WHERE (primary_reset_at IS NOT NULL AND primary_reset_at <= ?)
+		   OR (secondary_reset_at IS NOT NULL AND secondary_reset_at <= ?)
+		ORDER BY auth_name
+	`, dbTime(time.Now().In(appTimeLocation)), dbTime(time.Now().In(appTimeLocation)))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		addName(name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	filtered, _, err := a.filterKeeperCachedAuthNames(ctx, names, cfg)
+	return filtered, err
+}
+
+func (a *App) filterKeeperCachedAuthItems(ctx context.Context, items []map[string]any, cfg AppConfig) ([]map[string]any, int, error) {
+	if len(items) == 0 {
+		return items, 0, nil
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if name := keeperString(item["name"]); name != "" {
+			names = append(names, name)
+		}
+	}
+	allowedNames, skipped, err := a.filterKeeperCachedAuthNames(ctx, names, cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	allowed := map[string]bool{}
+	for _, name := range allowedNames {
+		allowed[name] = true
+	}
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		name := keeperString(item["name"])
+		if name == "" || allowed[name] {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, skipped, nil
+}
+
+func (a *App) filterKeeperCachedAuthNames(ctx context.Context, names []string, cfg AppConfig) ([]string, int, error) {
+	normalized, err := normalizeOptionalKeeperAuthNames(names)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(normalized) == 0 {
+		return normalized, 0, nil
+	}
+	cutoff := time.Now().In(appTimeLocation).Add(-keeperRefreshCacheDuration(cfg))
+	filtered := make([]string, 0, len(normalized))
+	skipped := 0
+	for _, name := range normalized {
+		cached, err := a.keeperAuthCheckedSince(ctx, name, cutoff)
+		if err != nil {
+			return nil, 0, err
+		}
+		if cached {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered, skipped, nil
+}
+
+func (a *App) keeperAuthCheckedSince(ctx context.Context, name string, cutoff time.Time) (bool, error) {
+	var lastChecked sql.NullString
+	err := a.db.QueryRowContext(ctx, `
+		SELECT CAST(last_checked_at AS TEXT)
+		FROM codex_keeper_auth_states
+		WHERE auth_name = ?
+	`, name).Scan(&lastChecked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !lastChecked.Valid {
+		return false, nil
+	}
+	checkedAt, ok := parseDBTime(lastChecked.String)
+	if !ok {
+		return false, nil
+	}
+	return checkedAt.After(cutoff) || checkedAt.Equal(cutoff), nil
 }
 
 func (a *App) processKeeperAuth(ctx context.Context, cfg AppConfig, authInfo map[string]any, logFn func(string), manualRefresh bool) keeperAccountResult {
