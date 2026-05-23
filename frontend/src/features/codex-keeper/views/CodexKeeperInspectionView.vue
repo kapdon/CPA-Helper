@@ -100,7 +100,7 @@ const unauthorizedErrorAccountCount = computed(
   () => accounts.value.filter((account) => account.last_status_code === 401).length,
 )
 const quotaExhaustedAccountCount = computed(
-  () => accounts.value.filter((account) => (account.priority ?? 0) === -1).length,
+  () => accounts.value.filter(isQuotaExhaustedAccount).length,
 )
 const isRunning = computed(() => status.value?.running === true)
 const runningModes = computed(() => new Set(status.value?.running_modes ?? []))
@@ -177,6 +177,10 @@ function applySettings(nextSettings: Awaited<ReturnType<typeof getCodexKeeperSet
   nextRunTimes.value = nextSettings.next_run_times
   schedulePreviewError.value = ''
   priorityRules.value = nextSettings.priority_rules.map((rule) => ({ ...rule }))
+}
+
+function isQuotaExhaustedAccount(account: CodexKeeperAccount): boolean {
+  return !account.disabled && (account.priority ?? 0) === -1
 }
 
 async function loadAll() {
