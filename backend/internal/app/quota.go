@@ -167,7 +167,7 @@ func (a *App) applyQuotaCharge(ctx context.Context, record UsageRecord) error {
 	if err == nil {
 		return nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 

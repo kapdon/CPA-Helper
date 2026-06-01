@@ -472,13 +472,13 @@ func TestKeeperQuotaWindowUsageInfersAccountWindows(t *testing.T) {
 		PrimaryResetAt: timePtrValue(resetAt),
 	}, now)
 	if freePair.Primary == nil {
-		t.Fatal("free primary window is nil, want weekly window")
+		t.Fatal("free primary window is nil, want monthly window")
 	}
-	if freePair.Primary.WindowSeconds != keeperWeekWindowSeconds || freePair.Primary.WindowSource != "inferred" {
-		t.Fatalf("free window = %d/%s, want inferred weekly", freePair.Primary.WindowSeconds, freePair.Primary.WindowSource)
+	if freePair.Primary.WindowSeconds != keeperMonthWindowSeconds || freePair.Primary.WindowSource != "inferred" {
+		t.Fatalf("free window = %d/%s, want inferred monthly", freePair.Primary.WindowSeconds, freePair.Primary.WindowSource)
 	}
 	if freePair.Secondary != nil {
-		t.Fatal("free secondary window is not nil, want single weekly window")
+		t.Fatal("free secondary window is not nil, want single monthly window")
 	}
 
 	plusPair := keeperQuotaWindowPairForAccount(keeperAccount{
@@ -606,7 +606,7 @@ func TestKeeperQuotaWindowUsageUsesCurrentWindowBoundariesAndPricing(t *testing.
 	}
 }
 
-func TestKeeperQuotaWindowUsageExcludesPreviousCycleWhenQuotaNotFull(t *testing.T) {
+func TestKeeperQuotaWindowUsageUsesFreeMonthlyWindowBoundaries(t *testing.T) {
 	t.Setenv("CPA_HELPER_DATA_DIR", t.TempDir())
 	app, err := New()
 	if err != nil {
@@ -615,36 +615,47 @@ func TestKeeperQuotaWindowUsageExcludesPreviousCycleWhenQuotaNotFull(t *testing.
 	defer app.Close()
 
 	now := time.Date(2026, 5, 18, 12, 30, 0, 0, appTimeLocation)
-	resetAt := now.Add(time.Duration(keeperWeekWindowSeconds) * time.Second)
-	windowStart := resetAt.Add(-time.Duration(keeperWeekWindowSeconds) * time.Second)
+	resetAt := now.Add(time.Hour)
+	windowStart := resetAt.Add(-time.Duration(keeperMonthWindowSeconds) * time.Second)
 	accounts := []keeperAccount{
 		{
-			Name:               "refreshed.json",
-			Email:              stringPtr("refreshed@example.com"),
+			Name:               "free-month.json",
+			Email:              stringPtr("free-month@example.com"),
 			AccountType:        stringPtr("free"),
 			PrimaryUsedPercent: intPtrValue(0),
 			PrimaryResetAt:     timePtrValue(resetAt),
 		},
 	}
 	insertKeeperWindowUsageRecord(t, app, keeperWindowUsageSeed{
+		Dedupe:       "inside-month-outside-week",
+		Timestamp:    now.Add(-8 * 24 * time.Hour),
+		Source:       "free-month@example.com",
+		InputTokens:  20,
+		OutputTokens: 10,
+		RawJSON:      `{"source":"free-month@example.com"}`,
+	})
+	insertKeeperWindowUsageRecord(t, app, keeperWindowUsageSeed{
 		Dedupe:       "previous-cycle-boundary",
 		Timestamp:    windowStart.Add(-3 * time.Second),
-		Source:       "refreshed@example.com",
+		Source:       "free-month@example.com",
 		InputTokens:  100,
 		OutputTokens: 50,
-		RawJSON:      `{"source":"refreshed@example.com"}`,
+		RawJSON:      `{"source":"free-month@example.com"}`,
 	})
 
 	usages, err := app.computeKeeperQuotaWindowUsages(context.Background(), accounts, now)
 	if err != nil {
 		t.Fatalf("compute window usages: %v", err)
 	}
-	usage := usages["refreshed.json"].Primary
+	usage := usages["free-month.json"].Primary
 	if usage == nil {
 		t.Fatal("primary window usage is nil")
 	}
-	if usage.Records != 0 || usage.TotalTokens != 0 {
-		t.Fatalf("usage = records %d tokens %d, want no previous-cycle usage", usage.Records, usage.TotalTokens)
+	if usage.WindowSeconds != keeperMonthWindowSeconds {
+		t.Fatalf("window seconds = %d, want monthly", usage.WindowSeconds)
+	}
+	if usage.Records != 1 || usage.TotalTokens != 30 {
+		t.Fatalf("usage = records %d tokens %d, want monthly-window record only", usage.Records, usage.TotalTokens)
 	}
 }
 

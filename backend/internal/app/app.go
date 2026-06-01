@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -91,50 +92,68 @@ func validationError(message string) *AppError {
 }
 
 func New() (*App, error) {
-	repoRoot, err := detectRepoRoot()
+	return NewWithOptions(context.Background(), NewOptions{
+		Migrate:         true,
+		StartBackground: true,
+	})
+}
+
+func NewWithOptions(ctx context.Context, options NewOptions) (*App, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	paths, err := resolveRuntimePaths()
 	if err != nil {
 		return nil, err
 	}
-	dataDir := os.Getenv("CPA_HELPER_DATA_DIR")
-	if strings.TrimSpace(dataDir) == "" {
-		dataDir = filepath.Join(repoRoot, "data")
+	if options.RequireReady && !options.Migrate {
+		if _, err := checkStartupPaths(ctx, paths); err != nil {
+			return nil, err
+		}
 	}
-	dbDir := filepath.Join(dataDir, "db")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		return nil, err
-	}
-
-	dbPath := filepath.Join(dbDir, "cpa_helper.sqlite3")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := openRuntimeDB(paths, false)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
 
-	frontendDist, frontendEnv := frontendDistDir(repoRoot)
+	frontendDist, frontendEnv := frontendDistDir(paths.RepoRoot)
 	frontendFS, _ := web.DistFS()
 	app := &App{
 		db:           db,
-		repoRoot:     repoRoot,
-		dataDir:      dataDir,
+		repoRoot:     paths.RepoRoot,
+		dataDir:      paths.DataDir,
 		frontendDist: frontendDist,
 		frontendFS:   frontendFS,
 		frontendEnv:  frontendEnv,
 	}
-	if err := app.runMigrations(context.Background()); err != nil {
+	if options.Migrate {
+		if err := app.runMigrations(ctx); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if options.RequireReady {
+		if _, err := checkDatabaseReady(ctx, db, paths.DBPath); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err := app.loadConfig(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
-	if _, err := app.loadConfig(context.Background()); err != nil {
-		db.Close()
-		return nil, err
+	if options.StartBackground {
+		app.startBackground(ctx)
 	}
-	app.collector = NewCollectorRunner(app)
-	app.keeper = NewKeeperRunner(app)
-	app.collector.Start()
-	app.keeper.LoadPersistedState(context.Background())
-	app.keeper.StartAutoIfConfigured()
 	return app, nil
+}
+
+func (a *App) startBackground(ctx context.Context) {
+	a.collector = NewCollectorRunner(a)
+	a.keeper = NewKeeperRunner(a)
+	a.collector.Start()
+	a.keeper.LoadPersistedState(ctx)
+	a.keeper.StartAutoIfConfigured()
 }
 
 func (a *App) Close() {
@@ -213,6 +232,25 @@ func (a *App) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return nil
+	}))
+	mux.HandleFunc("GET /api/ready", a.wrap(func(w http.ResponseWriter, r *http.Request) error {
+		report, err := a.Readiness(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"status": "not_ready",
+				"detail": map[string]string{
+					"code":    "startup_check_failed",
+					"message": err.Error(),
+				},
+			})
+			return nil
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "ready",
+			"current_version": report.CurrentVersion,
+			"target_version":  report.TargetVersion,
+		})
 		return nil
 	}))
 
@@ -503,9 +541,6 @@ func clonePriorityRules(input map[string]int) map[string]int {
 }
 
 func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
-	if err := a.ensureAppSetting(ctx); err != nil {
-		return AppConfig{}, err
-	}
 	row := a.db.QueryRowContext(ctx, `
 		SELECT collector_enabled, cliaproxy_url, management_key, queue_name, batch_size,
 		       poll_interval_seconds, retry_interval_seconds, codex_keeper_settings,
@@ -518,6 +553,9 @@ func (a *App) loadConfig(ctx context.Context) (AppConfig, error) {
 	var batchSize int
 	var pollInterval, retryInterval float64
 	if err := row.Scan(&collectorEnabled, &cliaproxyURL, &managementKey, &queueName, &batchSize, &pollInterval, &retryInterval, &keeperJSON, &rulesJSON, &litellmProxyEnabled, &litellmProxyURL, &modelRequestURL, &sessionSecret); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AppConfig{}, fmt.Errorf("%w: app_settings id=1 is missing; run `cpa-helper migrate`", ErrAppSettingsMissing)
+		}
 		return AppConfig{}, err
 	}
 	cfg, err := defaultConfig()
@@ -608,32 +646,6 @@ func (a *App) saveConfig(ctx context.Context, cfg AppConfig) error {
 		    model_request_url = ?, session_secret = ?, updated_at = ?
 		WHERE id = 1
 	`, cfg.Collector.Enabled, strings.TrimRight(strings.TrimSpace(cfg.Collector.CLIProxyURL), "/"), strings.TrimSpace(cfg.Collector.ManagementKey), strings.TrimSpace(cfg.Collector.QueueName), cfg.Collector.BatchSize, cfg.Collector.PollIntervalSeconds, cfg.Collector.RetryIntervalSeconds, string(keeperBytes), string(rulesBytes), cfg.LiteLLMProxy.Enabled, strings.TrimSpace(cfg.LiteLLMProxy.ProxyURL), strings.TrimRight(strings.TrimSpace(cfg.ModelRequestURL), "/"), cfg.SessionSecret, dbTime(time.Now()))
-	return err
-}
-
-func (a *App) ensureAppSetting(ctx context.Context) error {
-	var count int
-	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM app_settings WHERE id = 1`).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-	cfg, err := defaultConfig()
-	if err != nil {
-		return err
-	}
-	keeperBytes, _ := json.Marshal(cfg.CodexKeeper)
-	rulesBytes, _ := json.Marshal(cfg.CodexKeeperPriorityRule)
-	_, err = a.db.ExecContext(ctx, `
-		INSERT INTO app_settings (
-			id, collector_enabled, cliaproxy_url, management_key, queue_name,
-			batch_size, poll_interval_seconds, retry_interval_seconds,
-			codex_keeper_settings, codex_keeper_priority_rules,
-			litellm_proxy_enabled, litellm_proxy_url, model_request_url, session_secret,
-			created_at, updated_at
-		) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, cfg.Collector.Enabled, cfg.Collector.CLIProxyURL, cfg.Collector.ManagementKey, cfg.Collector.QueueName, cfg.Collector.BatchSize, cfg.Collector.PollIntervalSeconds, cfg.Collector.RetryIntervalSeconds, string(keeperBytes), string(rulesBytes), cfg.LiteLLMProxy.Enabled, cfg.LiteLLMProxy.ProxyURL, cfg.ModelRequestURL, cfg.SessionSecret, dbTime(time.Now()), dbTime(time.Now()))
 	return err
 }
 

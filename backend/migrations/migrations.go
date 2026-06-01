@@ -2,6 +2,9 @@ package migrations
 
 import "embed"
 
+// LatestVersion is the newest embedded migration version this binary expects.
+const LatestVersion int64 = 202605290001
+
 // FS contains SQL migrations embedded into the application binary.
 //
 //go:embed *.sql

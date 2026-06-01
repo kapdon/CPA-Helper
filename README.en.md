@@ -226,6 +226,17 @@ go mod download
 go run ./cmd/cpa-helper
 ```
 
+The binary also exposes explicit operational subcommands:
+
+```powershell
+go run ./cmd/cpa-helper migrate  # run database migrations and exit
+go run ./cmd/cpa-helper serve    # start only after read-only startup checks pass
+go run ./cmd/cpa-helper doctor   # run read-only startup checks and exit
+```
+
+Running without a subcommand is the user-facing startup path: it runs migrations,
+checks readiness, and then starts the service.
+
 For a local binary build, write the output to the ignored `backend/bin/` directory:
 
 ```powershell
@@ -418,7 +429,7 @@ cd backend
 go test ./...
 ```
 
-The Go backend runs embedded goose SQLite migrations on startup; migration files live in `backend/migrations/`, and Alembic is no longer required.
+The Go backend executable provides `migrate`, `serve`, and `doctor` subcommands. The default no-subcommand startup path runs embedded goose SQLite migrations before serving; `serve` performs read-only startup checks and fails if the database is missing or behind. Migration files live in `backend/migrations/`, and Alembic is no longer required.
 For Docker upgrades, keep mounting the existing `data/db/cpa_helper.sqlite3`; migration logic is packaged into the Go binary and does not read the old source tree.
 
 ## Contributing

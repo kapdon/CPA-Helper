@@ -226,6 +226,16 @@ go mod download
 go run ./cmd/cpa-helper
 ```
 
+后端可执行文件也提供显式运维子命令：
+
+```powershell
+go run ./cmd/cpa-helper migrate  # 只运行数据库迁移并退出
+go run ./cmd/cpa-helper serve    # 只在只读启动检查通过后启动服务
+go run ./cmd/cpa-helper doctor   # 只运行只读启动检查并退出
+```
+
+不带子命令运行是面向用户的默认启动路径：先迁移数据库，再执行就绪检查，然后启动服务。
+
 如需本地编译二进制，输出到已忽略的 `backend/bin/`：
 
 ```powershell
@@ -408,7 +418,7 @@ cd backend
 go test ./...
 ```
 
-Go 后端启动时会自动运行内嵌的 goose SQLite 迁移；迁移文件位于 `backend/migrations/`，不再需要 Alembic。
+Go 后端可执行文件提供 `migrate`、`serve` 和 `doctor` 子命令。不带子命令的默认启动路径会先运行内嵌 goose SQLite 迁移再启动服务；`serve` 只执行只读启动检查，数据库缺失或版本落后时会直接失败。迁移文件位于 `backend/migrations/`，不再需要 Alembic。
 Docker 升级时只需要继续挂载旧的 `data/db/cpa_helper.sqlite3`；迁移逻辑已经随 Go 二进制打包，不会读取旧源码目录。
 
 ## 贡献
